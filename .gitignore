@@ -1,0 +1,4 @@
+# build.ps1 output and the archive for sharing; the archive is published as a GitHub release
+bin/
+obj/
+dist/
