@@ -28,9 +28,13 @@ enum { TIMER_POLL = 1, TIMER_SETTLE, TIMER_TRIM };
 
 enum { LAYOUT_ROW, LAYOUT_GRID, LAYOUT_COLUMN };
 
+#define SCREEN_NAME_SIZE 128
+
 typedef struct {
-    bool has_pos; // false until the widget has been placed
-    int x, y;     // window position, device pixels
+    bool has_pos;                  // false until the widget has been placed
+    int x, y;                      // window position, device pixels
+    char screen[SCREEN_NAME_SIZE]; // the screen it is on (see identify_screen in main.c), "" when unknown
+    int screen_left, screen_top;   // where that screen's top-left corner was when x, y were saved
     int layout;
     double scale;
     bool locked, topmost;

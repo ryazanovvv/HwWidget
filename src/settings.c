@@ -51,6 +51,13 @@ void settings_load(Settings *s)
         s->x = (int)strtol(x, NULL, 10);
         s->y = (int)strtol(y, NULL, 10);
     }
+    const char *screen = value_of(json, "Screen"), *left = value_of(json, "ScreenLeft"), *top = value_of(json, "ScreenTop");
+    size_t n = screen && *screen == '"' ? strcspn(screen + 1, "\"") : sizeof s->screen;
+    if (s->has_pos && n < sizeof s->screen && left && top) {
+        memcpy(s->screen, screen + 1, n);
+        s->screen_left = (int)strtol(left, NULL, 10);
+        s->screen_top = (int)strtol(top, NULL, 10);
+    }
     if ((v = value_of(json, "Layout")))
         s->layout = !strncmp(v, "\"grid\"", 6) ? LAYOUT_GRID : !strncmp(v, "\"column\"", 8) ? LAYOUT_COLUMN : LAYOUT_ROW;
     if ((v = value_of(json, "Scale"))) s->scale = strtod(v, NULL);
@@ -63,19 +70,22 @@ void settings_load(Settings *s)
 void settings_save(const Settings *s)
 {
     static const char *const layouts[] = { "row", "grid", "column" };
-    char x[16] = "null", y[16] = "null", scale[32], json[256];
+    char x[16] = "null", y[16] = "null", screen[SCREEN_NAME_SIZE + 96] = "", scale[32], json[512];
     if (s->has_pos) {
         snprintf(x, sizeof x, "%d", s->x);
         snprintf(y, sizeof y, "%d", s->y);
     }
+    if (s->has_pos && s->screen[0]) // the name holds nothing JSON would need escaped
+        snprintf(screen, sizeof screen, "  \"Screen\": \"%s\",\r\n  \"ScreenLeft\": %d,\r\n  \"ScreenTop\": %d,\r\n",
+                 s->screen, s->screen_left, s->screen_top);
     snprintf(scale, sizeof scale, "%.2f", s->scale); // "1.10" → "1.1", "1.00" → "1"
     char *end = scale + strlen(scale);
     while (end[-1] == '0') *--end = 0;
     if (end[-1] == '.') *--end = 0;
     int n = snprintf(json, sizeof json,
-        "{\r\n  \"X\": %s,\r\n  \"Y\": %s,\r\n  \"Layout\": \"%s\",\r\n  \"Scale\": %s,\r\n"
+        "{\r\n  \"X\": %s,\r\n  \"Y\": %s,\r\n%s  \"Layout\": \"%s\",\r\n  \"Scale\": %s,\r\n"
         "  \"Locked\": %s,\r\n  \"Topmost\": %s\r\n}",
-        x, y, layouts[s->layout], scale, s->locked ? "true" : "false", s->topmost ? "true" : "false");
+        x, y, screen, layouts[s->layout], scale, s->locked ? "true" : "false", s->topmost ? "true" : "false");
 
     WCHAR path[MAX_PATH], tmp[MAX_PATH];
     if (!path_of(L"settings.json", path)) return;

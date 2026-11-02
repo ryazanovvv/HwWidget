@@ -35,7 +35,7 @@ static Gauge g_gauges[GAUGE_COUNT] = {
 };
 static HPOWERNOTIFY g_display_notify;
 static bool g_polling;
-static bool g_restore_pending; // the saved spot is on a screen that has not come up yet
+static bool g_restore_pending; // the saved spot is on a screen that is missing: still waking up, or unplugged
 static bool g_dragging;
 static POINT g_grab; // the cursor's offset from the window corner while dragging
 static int g_wheel;  // wheel movement short of a whole notch
@@ -300,11 +300,11 @@ static void move_by(int dx, int dy)
     SetWindowPos(g_hwnd, NULL, r.left + dx, r.top + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-static void move_to_saved(void)
+static void move_to(POINT spot)
 {
     RECT r;
     GetWindowRect(g_hwnd, &r);
-    move_by(g_settings.x - r.left, g_settings.y - r.top);
+    move_by(spot.x - r.left, spot.y - r.top);
 }
 
 // First run: the top-right corner of the main screen.
@@ -337,10 +337,72 @@ static void keep_inside(void)
     move_by(dx, dy);
 }
 
+// ---- The widget's own screen ----
+
+// A screen's own name, which it keeps when unplugged and plugged back into the same port:
+// "DISPLAY#GSM5B7F#5&2b4ef27c&0&UID4352" out of its device path "\\?\DISPLAY#...#{guid}". Also where
+// the screen is now.
+static bool identify_screen(HMONITOR monitor, char name[SCREEN_NAME_SIZE], RECT *rc)
+{
+    MONITORINFOEXW mi;
+    DISPLAY_DEVICEW device = { .cb = sizeof device };
+    mi.cbSize = sizeof mi;
+    name[0] = 0;
+    if (!GetMonitorInfoW(monitor, (MONITORINFO *)&mi) ||
+        !EnumDisplayDevicesW(mi.szDevice, 0, &device, EDD_GET_DEVICE_INTERFACE_NAME))
+        return false;
+    const WCHAR *p = device.DeviceID;
+    if (!wcsncmp(p, L"\\\\?\\", 4)) p += 4;
+    size_t n = 0;
+    for (; *p && *p != L'{' && n + 1 < SCREEN_NAME_SIZE; p++)
+        name[n++] = *p < 0x80 && *p != L'"' && *p != L'\\' ? (char)*p : '_'; // nothing to escape in JSON
+    while (n && name[n - 1] == '#') n--;
+    name[n] = 0;
+    *rc = mi.rcMonitor;
+    return n > 0;
+}
+
+typedef struct {
+    const char *name;
+    RECT rc;
+    bool found;
+} ScreenSearch;
+
+static BOOL CALLBACK match_screen(HMONITOR monitor, HDC dc, LPRECT clip, LPARAM data)
+{
+    (void)dc, (void)clip;
+    ScreenSearch *s = (ScreenSearch *)data;
+    char name[SCREEN_NAME_SIZE];
+    RECT rc;
+    if (!identify_screen(monitor, name, &rc) || strcmp(name, s->name)) return TRUE;
+    s->rc = rc;
+    s->found = true;
+    return FALSE;
+}
+
+// Where the saved spot is now: on its own screen, wherever that screen sits among the others. False
+// while the screen is missing: right after logon it may still be waking up, or it was unplugged.
+static bool home_spot(POINT *spot)
+{
+    if (!g_settings.has_pos) return false;
+    *spot = (POINT){ g_settings.x, g_settings.y };
+    if (!g_settings.screen[0]) return is_on_screen(spot->x, spot->y); // saved before screens had names
+    ScreenSearch s = { g_settings.screen };
+    EnumDisplayMonitors(NULL, NULL, match_screen, (LPARAM)&s);
+    if (!s.found) return false;
+    spot->x += s.rc.left - g_settings.screen_left;
+    spot->y += s.rc.top - g_settings.screen_top;
+    return true;
+}
+
 static void save_position(void)
 {
-    if (!g_restore_pending) { // otherwise keep the spot on the screen that is still missing
-        RECT r;
+    if (!g_restore_pending) { // otherwise keep the spot on the screen that is missing
+        RECT r = card_rect(), screen;
+        if (identify_screen(MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST), g_settings.screen, &screen)) {
+            g_settings.screen_left = screen.left;
+            g_settings.screen_top = screen.top;
+        }
         GetWindowRect(g_hwnd, &r);
         g_settings.has_pos = true;
         g_settings.x = r.left;
@@ -349,26 +411,43 @@ static void save_position(void)
     settings_save(&g_settings);
 }
 
-// The saved spot when its screen is there, else the default corner.
+// Coming from a screen with another DPI, the window is resized around a spot of Windows' choosing,
+// so it is put on its own spot once more; nothing is saved in between.
+static void go_home(POINT spot)
+{
+    g_restore_pending = true;
+    move_to(spot);
+    move_to(spot);
+    g_restore_pending = false;
+    keep_inside();
+}
+
+// While its screen is missing, the widget waits at the closest spot on the screens there are. The saved
+// spot stays its home, unless the user drags the widget elsewhere.
+static void wait_near_home(void)
+{
+    g_restore_pending = true;
+    move_to((POINT){ g_settings.x, g_settings.y });
+    keep_inside();
+    snap_to_edges();
+}
+
+// The saved spot, or the default corner on the first run.
 static void place(void)
 {
-    if (g_settings.has_pos && is_on_screen(g_settings.x, g_settings.y)) {
-        move_to_saved();
-        keep_inside();
-    } else {
-        g_restore_pending = g_settings.has_pos; // right after logon a screen may still be waking up
-        place_default();
-    }
+    POINT home;
+    if (home_spot(&home)) go_home(home);
+    else if (g_settings.has_pos) wait_near_home();
+    else place_default();
     save_position();
 }
 
 static void on_screens_changed(void)
 {
-    if (g_restore_pending && is_on_screen(g_settings.x, g_settings.y)) {
-        g_restore_pending = false;
-        move_to_saved();
-    }
-    keep_inside();
+    POINT home;
+    if (home_spot(&home)) go_home(home);
+    else if (g_settings.has_pos) wait_near_home();
+    else keep_inside();
 }
 
 // ---- Layout and scale ----
@@ -419,6 +498,8 @@ static void on_dpi_changed(UINT dpi, const RECT *suggested)
         g_grab.y = g_grab.y * g_layout.height / (before.bottom > before.top ? before.bottom - before.top : 1);
         return;
     }
+    POINT home;
+    if (g_settings.has_pos && !home_spot(&home)) g_restore_pending = true; // Windows moved it off a screen that went away
     keep_inside();
     snap_to_edges();
     save_position();
@@ -677,10 +758,11 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE prev, LPSTR cmd_line, int show)
     wc.lpszClassName = TIP_CLASS;
     RegisterClassExW(&wc);
 
-    // Created on the saved screen, so the first layout already has its DPI.
-    bool saved = g_settings.has_pos && is_on_screen(g_settings.x, g_settings.y);
+    // Created on the saved spot, so the first layout already has its screen's DPI.
+    POINT home;
+    bool saved = home_spot(&home);
     g_hwnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | (g_settings.topmost ? WS_EX_TOPMOST : 0),
-                             APP_CLASS, L"HW Widget", WS_POPUP, saved ? g_settings.x : 0, saved ? g_settings.y : 0, 1, 1,
+                             APP_CLASS, L"HW Widget", WS_POPUP, saved ? home.x : 0, saved ? home.y : 0, 1, 1,
                              NULL, NULL, instance, NULL);
     if (!g_hwnd) return 1;
     // Let "HwWidget.exe --quit" reach this window even though it runs elevated.
